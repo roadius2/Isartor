@@ -153,6 +153,13 @@ pub async fn handle_set_key(args: SetKeyArgs) -> Result<()> {
         std::fs::write(&env_path, &env_content)
             .with_context(|| format!("Failed to write {}", env_path.display()))?;
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&env_path, std::fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("Failed to set permissions on {}", env_path.display()))?;
+        }
+
         eprintln!();
         eprintln!("  ✓ Provider:  {}", provider_str);
         eprintln!("  ✓ Model:     {}", model);

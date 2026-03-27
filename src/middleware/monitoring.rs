@@ -62,18 +62,23 @@ pub async fn root_monitoring_middleware(request: Request, next: Next) -> impl In
     let (endpoint_family, client_name) = endpoint_family_for_path(&path);
     let should_record_prompt_stats = !path.starts_with("/debug/");
 
-    // Identify the AI tool from the User-Agent header.
-    let user_agent = request
+    // Identify the AI tool from the x-agent-id header (if present),
+    // falling back to User-Agent header.
+    // Identify the AI tool from the x-agent-id header (if present),
+    // falling back to User-Agent header.
+    let agent_id_owned = request
+        .headers()
+        .get("x-agent-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let user_agent_owned = request
         .headers()
         .get(axum::http::header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let tool = tool_identity::identify_tool_or_fallback(
-        if user_agent.is_empty() {
-            None
-        } else {
-            Some(user_agent)
-        },
+        .map(|s| s.to_string());
+    let tool = tool_identity::identify_agent_or_tool(
+        agent_id_owned.as_deref(),
+        user_agent_owned.as_deref(),
         "gateway",
     );
 
@@ -280,6 +285,9 @@ mod tests {
             enable_context_optimizer: true,
             context_optimizer_dedup: true,
             context_optimizer_minify: true,
+            l3_max_requests_per_minute: 0,
+            l3_circuit_breaker_threshold: 5,
+            l3_circuit_breaker_cooldown_secs: 30,
         });
 
         Arc::new(AppState {
@@ -290,6 +298,8 @@ mod tests {
             slm_client: Arc::new(SlmClient::new(&config.layer2)),
             text_embedder: shared_test_embedder(),
             instruction_cache: Arc::new(InstructionCache::new()),
+            l3_rate_limiter: Arc::new(crate::rate_limiter::L3RateLimiter::new(0)),
+            l3_circuit_breaker: Arc::new(crate::circuit_breaker::L3CircuitBreaker::new(5, 30)),
             config,
             #[cfg(feature = "embedded-inference")]
             embedded_classifier: None,

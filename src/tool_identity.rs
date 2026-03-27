@@ -74,6 +74,22 @@ pub fn identify_tool_or_fallback(user_agent: Option<&str>, traffic_surface: &str
     }
 }
 
+/// Identify agent from an explicit `x-agent-id` header, falling back to
+/// User-Agent identification and then traffic-surface inference.
+pub fn identify_agent_or_tool<'a>(
+    agent_id: Option<&'a str>,
+    user_agent: Option<&'a str>,
+    fallback: &'a str,
+) -> &'a str {
+    if let Some(id) = agent_id {
+        let trimmed = id.trim();
+        if !trimmed.is_empty() {
+            return trimmed;
+        }
+    }
+    identify_tool_or_fallback(user_agent, fallback)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

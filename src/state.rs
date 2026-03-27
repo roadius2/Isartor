@@ -12,12 +12,14 @@ use rig::providers::{
     mistral, moonshot, ollama, openai, openrouter, perplexity, together, xai,
 };
 
+use crate::circuit_breaker::L3CircuitBreaker;
 use crate::clients::slm::SlmClient;
 use crate::config::AppConfig;
 use crate::core::context_compress::InstructionCache;
 use crate::layer1::embeddings::TextEmbedder;
 use crate::layer1::layer1a_cache::ExactMatchCache;
 use crate::providers::copilot::CopilotAgent;
+use crate::rate_limiter::L3RateLimiter;
 use crate::vector_cache::VectorCache;
 
 // ── Multi-provider Agent Wrapper ─────────────────────────────────────
@@ -85,6 +87,12 @@ pub struct AppState {
 
     /// L2.5 instruction dedup cache for cross-turn session deduplication.
     pub instruction_cache: Arc<InstructionCache>,
+
+    /// Sliding-window rate limiter for L3 cloud requests.
+    pub l3_rate_limiter: Arc<L3RateLimiter>,
+
+    /// Circuit breaker for L3 cloud provider failures.
+    pub l3_circuit_breaker: Arc<L3CircuitBreaker>,
 
     #[cfg(feature = "embedded-inference")]
     pub embedded_classifier: Option<Arc<crate::services::local_inference::EmbeddedClassifier>>,
@@ -331,6 +339,12 @@ impl AppState {
                 None
             };
 
+        let l3_rate_limiter = Arc::new(L3RateLimiter::new(config.l3_max_requests_per_minute));
+        let l3_circuit_breaker = Arc::new(L3CircuitBreaker::new(
+            config.l3_circuit_breaker_threshold,
+            config.l3_circuit_breaker_cooldown_secs,
+        ));
+
         Self {
             config,
             http_client,
@@ -340,6 +354,8 @@ impl AppState {
             slm_client,
             text_embedder,
             instruction_cache: Arc::new(InstructionCache::new()),
+            l3_rate_limiter,
+            l3_circuit_breaker,
             #[cfg(feature = "embedded-inference")]
             embedded_classifier,
         }
@@ -425,6 +441,9 @@ mod tests {
             enable_context_optimizer: true,
             context_optimizer_dedup: true,
             context_optimizer_minify: true,
+            l3_max_requests_per_minute: 0,
+            l3_circuit_breaker_threshold: 5,
+            l3_circuit_breaker_cooldown_secs: 30,
         })
     }
 

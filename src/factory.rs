@@ -129,6 +129,9 @@ mod tests {
             enable_context_optimizer: true,
             context_optimizer_dedup: true,
             context_optimizer_minify: true,
+            l3_max_requests_per_minute: 0,
+            l3_circuit_breaker_threshold: 5,
+            l3_circuit_breaker_cooldown_secs: 30,
         }
     }
 

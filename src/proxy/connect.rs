@@ -1023,6 +1023,9 @@ mod tests {
             enable_context_optimizer: true,
             context_optimizer_dedup: true,
             context_optimizer_minify: true,
+            l3_max_requests_per_minute: 0,
+            l3_circuit_breaker_threshold: 5,
+            l3_circuit_breaker_cooldown_secs: 30,
         })
     }
 
@@ -1037,6 +1040,8 @@ mod tests {
             slm_client: Arc::new(SlmClient::new(&config.layer2)),
             text_embedder: shared_test_embedder(),
             instruction_cache: Arc::new(InstructionCache::new()),
+            l3_rate_limiter: Arc::new(crate::rate_limiter::L3RateLimiter::new(0)),
+            l3_circuit_breaker: Arc::new(crate::circuit_breaker::L3CircuitBreaker::new(5, 30)),
             #[cfg(feature = "embedded-inference")]
             embedded_classifier: None,
         })

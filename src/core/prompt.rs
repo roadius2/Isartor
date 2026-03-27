@@ -1,4 +1,5 @@
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 /// Extract a stable "prompt string" from various client request formats.
 ///
@@ -140,14 +141,34 @@ pub fn extract_semantic_key(body: &[u8]) -> String {
 
     // Chat-like: find the last user message.
     if let Some(messages) = v.get("messages").and_then(|m| m.as_array()) {
-        for msg in messages.iter().rev() {
+        let mut last_user: Option<String> = None;
+        let mut tool_content_buf = String::new();
+
+        for msg in messages.iter() {
             let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
             if role == "user" {
                 let content = extract_message_content(msg);
                 if !content.trim().is_empty() {
-                    return content;
+                    last_user = Some(content);
+                }
+            } else if role == "tool" {
+                let content = extract_message_content(msg);
+                if !content.trim().is_empty() {
+                    tool_content_buf.push_str(&content);
                 }
             }
+        }
+
+        if let Some(key) = last_user {
+            if tool_content_buf.is_empty() {
+                return key;
+            }
+            // Append a stable hash of tool-role message contents so that
+            // identical user questions with different tool context produce
+            // distinct semantic keys.
+            let hash = Sha256::digest(tool_content_buf.as_bytes());
+            let suffix = &hex::encode(hash)[..16];
+            return format!("{key} [tool_ctx:{suffix}]");
         }
     }
 

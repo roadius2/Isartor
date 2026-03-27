@@ -54,11 +54,21 @@ fn streaming_cache_response(
 /// active cache(s). If the embedding service is unreachable in
 /// `semantic`/`both` modes, the layer gracefully falls through.
 pub async fn cache_middleware(request: Request, next: Next) -> Response {
-    let user_agent = request
+    let agent_id_owned = request
+        .headers()
+        .get("x-agent-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let user_agent_owned = request
         .headers()
         .get(axum::http::header::USER_AGENT)
-        .and_then(|value| value.to_str().ok());
-    let tool = crate::tool_identity::identify_tool_or_fallback(user_agent, "gateway");
+        .and_then(|value| value.to_str().ok())
+        .map(|s| s.to_string());
+    let tool = crate::tool_identity::identify_agent_or_tool(
+        agent_id_owned.as_deref(),
+        user_agent_owned.as_deref(),
+        "gateway",
+    );
     let state = match request.extensions().get::<Arc<AppState>>() {
         Some(s) => s.clone(),
         None => {
@@ -418,6 +428,9 @@ mod tests {
             enable_context_optimizer: true,
             context_optimizer_dedup: true,
             context_optimizer_minify: true,
+            l3_max_requests_per_minute: 0,
+            l3_circuit_breaker_threshold: 5,
+            l3_circuit_breaker_cooldown_secs: 30,
         })
     }
 
@@ -433,6 +446,8 @@ mod tests {
             slm_client: Arc::new(SlmClient::new(&config.layer2)),
             text_embedder: shared_test_embedder(),
             instruction_cache: Arc::new(InstructionCache::new()),
+            l3_rate_limiter: Arc::new(crate::rate_limiter::L3RateLimiter::new(0)),
+            l3_circuit_breaker: Arc::new(crate::circuit_breaker::L3CircuitBreaker::new(5, 30)),
             config,
             #[cfg(feature = "embedded-inference")]
             embedded_classifier: None,

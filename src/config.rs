@@ -227,6 +227,14 @@ fn default_max_answer_tokens() -> u32 {
     2048
 }
 
+fn default_circuit_breaker_threshold() -> u32 {
+    5
+}
+
+fn default_circuit_breaker_cooldown_secs() -> u64 {
+    30
+}
+
 // ═════════════════════════════════════════════════════════════════════
 // Embedding Sidecar Settings — Lightweight Sidecar (llama.cpp --embedding)
 // ═════════════════════════════════════════════════════════════════════
@@ -364,6 +372,20 @@ pub struct AppConfig {
     /// HTTP request timeout for Layer 3 provider calls, in seconds.
     pub l3_timeout_secs: u64,
 
+    /// Maximum L3 cloud requests per minute (sliding window). 0 = disabled.
+    #[serde(default)]
+    pub l3_max_requests_per_minute: u64,
+
+    /// Number of consecutive L3 failures before the circuit breaker opens.
+    /// 0 = disabled. Default is 5.
+    #[serde(default = "default_circuit_breaker_threshold")]
+    pub l3_circuit_breaker_threshold: u32,
+
+    /// Cooldown in seconds after the circuit breaker opens before allowing
+    /// requests again. Default is 30.
+    #[serde(default = "default_circuit_breaker_cooldown_secs")]
+    pub l3_circuit_breaker_cooldown_secs: u64,
+
     // ── Azure-specific ──────────────────────────────────────────────
     /// Azure OpenAI deployment ID (only used when `llm_provider` = "azure").
     pub azure_deployment_id: String,
@@ -469,6 +491,9 @@ impl AppConfig {
             .set_default("external_llm_model", "gpt-4o-mini")?
             .set_default("external_llm_api_key", "")?
             .set_default("l3_timeout_secs", 120_i64)?
+            .set_default("l3_max_requests_per_minute", 0_i64)?
+            .set_default("l3_circuit_breaker_threshold", 5_i64)?
+            .set_default("l3_circuit_breaker_cooldown_secs", 30_i64)?
             // Azure
             .set_default("azure_deployment_id", "")?
             .set_default("azure_api_version", "2024-08-01-preview")?
@@ -739,6 +764,12 @@ mod tests {
             .unwrap()
             .set_default("l3_timeout_secs", 120_i64)
             .unwrap()
+            .set_default("l3_max_requests_per_minute", 0_i64)
+            .unwrap()
+            .set_default("l3_circuit_breaker_threshold", 5_i64)
+            .unwrap()
+            .set_default("l3_circuit_breaker_cooldown_secs", 30_i64)
+            .unwrap()
             .set_default("azure_deployment_id", "")
             .unwrap()
             .set_default("azure_api_version", "2024-08-01-preview")
@@ -860,6 +891,12 @@ mod tests {
             .unwrap()
             .set_default("l3_timeout_secs", 120_i64)
             .unwrap()
+            .set_default("l3_max_requests_per_minute", 0_i64)
+            .unwrap()
+            .set_default("l3_circuit_breaker_threshold", 5_i64)
+            .unwrap()
+            .set_default("l3_circuit_breaker_cooldown_secs", 30_i64)
+            .unwrap()
             .set_default("azure_deployment_id", "")
             .unwrap()
             .set_default("azure_api_version", "2024-08-01-preview")
@@ -967,6 +1004,12 @@ mod tests {
             .set_default("external_llm_api_key", "")
             .unwrap()
             .set_default("l3_timeout_secs", 120_i64)
+            .unwrap()
+            .set_default("l3_max_requests_per_minute", 0_i64)
+            .unwrap()
+            .set_default("l3_circuit_breaker_threshold", 5_i64)
+            .unwrap()
+            .set_default("l3_circuit_breaker_cooldown_secs", 30_i64)
             .unwrap()
             .set_default("azure_deployment_id", "")
             .unwrap()
@@ -1080,6 +1123,12 @@ mod tests {
             .set_default("external_llm_api_key", "")
             .unwrap()
             .set_default("l3_timeout_secs", 120_i64)
+            .unwrap()
+            .set_default("l3_max_requests_per_minute", 0_i64)
+            .unwrap()
+            .set_default("l3_circuit_breaker_threshold", 5_i64)
+            .unwrap()
+            .set_default("l3_circuit_breaker_cooldown_secs", 30_i64)
             .unwrap()
             .set_default("azure_deployment_id", "")
             .unwrap()

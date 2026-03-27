@@ -265,6 +265,38 @@ pub async fn chat_handler(request: Request) -> impl IntoResponse {
         tracing::info!(prompt = %prompt, provider = provider_name, "Layer 3: Forwarding to LLM via Rig");
 
         // ------------------------------------------------------------------
+        // 1b. Rate limiter guard.
+        // ------------------------------------------------------------------
+        if !state.l3_rate_limiter.try_acquire() {
+            tracing::warn!("Layer 3: request rate-limited");
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(ChatResponse {
+                    layer: 3,
+                    message: "L3 rate limit exceeded — try again shortly".into(),
+                    model: None,
+                }),
+            )
+                .into_response();
+        }
+
+        // ------------------------------------------------------------------
+        // 1c. Circuit breaker guard.
+        // ------------------------------------------------------------------
+        if state.l3_circuit_breaker.is_open() {
+            tracing::warn!("Layer 3: circuit breaker open — blocking request");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ChatResponse {
+                    layer: 3,
+                    message: "L3 circuit breaker open — upstream temporarily unavailable".into(),
+                    model: None,
+                }),
+            )
+                .into_response();
+        }
+
+        // ------------------------------------------------------------------
         // 2. Dispatch to the configured rig-core Agent — with retry.
         // ------------------------------------------------------------------
         let retry_cfg = RetryConfig::cloud_llm();
@@ -287,6 +319,7 @@ pub async fn chat_handler(request: Request) -> impl IntoResponse {
 
         match result {
             Ok(text) => {
+                state.l3_circuit_breaker.record_success();
                 crate::metrics::record_layer_duration_with_tool(
                     "L3_Cloud",
                     layer_start.elapsed(),
@@ -305,6 +338,7 @@ pub async fn chat_handler(request: Request) -> impl IntoResponse {
                 response
             }
             Err(gw_err) => {
+                state.l3_circuit_breaker.record_failure();
                 crate::metrics::record_layer_duration_with_tool(
                     "L3_Cloud",
                     layer_start.elapsed(),
@@ -415,6 +449,28 @@ pub async fn openai_chat_completions_handler(request: Request) -> impl IntoRespo
                 .into_response();
         }
 
+        if !state.l3_rate_limiter.try_acquire() {
+            tracing::warn!("OpenAI compat: request rate-limited");
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({
+                    "error": {"message": "L3 rate limit exceeded — try again shortly"}
+                })),
+            )
+                .into_response();
+        }
+
+        if state.l3_circuit_breaker.is_open() {
+            tracing::warn!("OpenAI compat: circuit breaker open");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": {"message": "L3 circuit breaker open — upstream temporarily unavailable"}
+                })),
+            )
+                .into_response();
+        }
+
         let body_bytes = match request.extensions().get::<BufferedBody>() {
             Some(buf) => buf.0.clone(),
             None => {
@@ -465,6 +521,7 @@ pub async fn openai_chat_completions_handler(request: Request) -> impl IntoRespo
 
             match result {
                 Ok(body) => {
+                    state.l3_circuit_breaker.record_success();
                     crate::metrics::record_layer_duration_with_tool(
                         "L3_Cloud",
                         layer_start.elapsed(),
@@ -476,6 +533,7 @@ pub async fn openai_chat_completions_handler(request: Request) -> impl IntoRespo
                     return resp;
                 }
                 Err(gw_err) => {
+                    state.l3_circuit_breaker.record_failure();
                     crate::metrics::record_layer_duration_with_tool(
                         "L3_Cloud",
                         layer_start.elapsed(),
@@ -526,6 +584,7 @@ pub async fn openai_chat_completions_handler(request: Request) -> impl IntoRespo
 
         match result {
             Ok(text) => {
+                state.l3_circuit_breaker.record_success();
                 crate::metrics::record_layer_duration_with_tool(
                     "L3_Cloud",
                     layer_start.elapsed(),
@@ -553,6 +612,7 @@ pub async fn openai_chat_completions_handler(request: Request) -> impl IntoRespo
                 resp
             }
             Err(gw_err) => {
+                state.l3_circuit_breaker.record_failure();
                 crate::metrics::record_layer_duration_with_tool(
                     "L3_Cloud",
                     layer_start.elapsed(),
@@ -633,6 +693,36 @@ pub async fn anthropic_messages_handler(request: Request) -> impl IntoResponse {
                 .into_response();
         }
 
+        if !state.l3_rate_limiter.try_acquire() {
+            tracing::warn!("Anthropic compat: request rate-limited");
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": "rate_limit_error",
+                        "message": "L3 rate limit exceeded — try again shortly"
+                    }
+                })),
+            )
+                .into_response();
+        }
+
+        if state.l3_circuit_breaker.is_open() {
+            tracing::warn!("Anthropic compat: circuit breaker open");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": "api_error",
+                        "message": "L3 circuit breaker open — upstream temporarily unavailable"
+                    }
+                })),
+            )
+                .into_response();
+        }
+
         let body_bytes = match request.extensions().get::<BufferedBody>() {
             Some(buf) => buf.0.clone(),
             None => {
@@ -676,6 +766,7 @@ pub async fn anthropic_messages_handler(request: Request) -> impl IntoResponse {
 
         match result {
             Ok(text) => {
+                state.l3_circuit_breaker.record_success();
                 crate::metrics::record_layer_duration_with_tool(
                     "L3_Cloud",
                     layer_start.elapsed(),
@@ -690,6 +781,7 @@ pub async fn anthropic_messages_handler(request: Request) -> impl IntoResponse {
                 resp
             }
             Err(gw_err) => {
+                state.l3_circuit_breaker.record_failure();
                 crate::metrics::record_layer_duration_with_tool(
                     "L3_Cloud",
                     layer_start.elapsed(),
@@ -1387,6 +1479,9 @@ mod tests {
             enable_context_optimizer: true,
             context_optimizer_dedup: true,
             context_optimizer_minify: true,
+            l3_max_requests_per_minute: 0,
+            l3_circuit_breaker_threshold: 5,
+            l3_circuit_breaker_cooldown_secs: 30,
         });
 
         Arc::new(AppState {
@@ -1397,6 +1492,8 @@ mod tests {
             slm_client: Arc::new(SlmClient::new(&config.layer2)),
             text_embedder: shared_test_embedder(),
             instruction_cache: Arc::new(InstructionCache::new()),
+            l3_rate_limiter: Arc::new(crate::rate_limiter::L3RateLimiter::new(0)),
+            l3_circuit_breaker: Arc::new(crate::circuit_breaker::L3CircuitBreaker::new(5, 30)),
             config,
             #[cfg(feature = "embedded-inference")]
             embedded_classifier: None,
@@ -1625,6 +1722,8 @@ mod tests {
             slm_client: state.slm_client.clone(),
             text_embedder: state.text_embedder.clone(),
             instruction_cache: Arc::new(InstructionCache::new()),
+            l3_rate_limiter: Arc::new(crate::rate_limiter::L3RateLimiter::new(0)),
+            l3_circuit_breaker: Arc::new(crate::circuit_breaker::L3CircuitBreaker::new(5, 30)),
             config: Arc::new(config),
             #[cfg(feature = "embedded-inference")]
             embedded_classifier: None,
@@ -1741,6 +1840,8 @@ mod tests {
             slm_client: state.slm_client.clone(),
             text_embedder: state.text_embedder.clone(),
             instruction_cache: Arc::new(InstructionCache::new()),
+            l3_rate_limiter: Arc::new(crate::rate_limiter::L3RateLimiter::new(0)),
+            l3_circuit_breaker: Arc::new(crate::circuit_breaker::L3CircuitBreaker::new(5, 30)),
             config: Arc::new(config),
             #[cfg(feature = "embedded-inference")]
             embedded_classifier: None,
@@ -1799,6 +1900,8 @@ mod tests {
             slm_client: state.slm_client.clone(),
             text_embedder: state.text_embedder.clone(),
             instruction_cache: Arc::new(InstructionCache::new()),
+            l3_rate_limiter: Arc::new(crate::rate_limiter::L3RateLimiter::new(0)),
+            l3_circuit_breaker: Arc::new(crate::circuit_breaker::L3CircuitBreaker::new(5, 30)),
             config: Arc::new(config),
             #[cfg(feature = "embedded-inference")]
             embedded_classifier: None,
@@ -1848,6 +1951,8 @@ mod tests {
             slm_client: state.slm_client.clone(),
             text_embedder: state.text_embedder.clone(),
             instruction_cache: Arc::new(InstructionCache::new()),
+            l3_rate_limiter: Arc::new(crate::rate_limiter::L3RateLimiter::new(0)),
+            l3_circuit_breaker: Arc::new(crate::circuit_breaker::L3CircuitBreaker::new(5, 30)),
             config: Arc::new(config),
             #[cfg(feature = "embedded-inference")]
             embedded_classifier: None,

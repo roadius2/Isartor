@@ -7,6 +7,7 @@
 
 pub mod adapters;
 pub mod anthropic_sse;
+pub mod circuit_breaker;
 pub mod cli;
 pub mod clients;
 pub mod compression;
@@ -28,6 +29,7 @@ pub mod openai_sse;
 pub mod pipeline;
 pub mod providers;
 pub mod proxy;
+pub mod rate_limiter;
 #[cfg(feature = "embedded-inference")]
 pub mod services;
 pub mod state;

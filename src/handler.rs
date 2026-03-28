@@ -891,15 +891,52 @@ pub async fn anthropic_messages_handler(request: Request) -> impl IntoResponse {
                 .header(CONTENT_TYPE, "application/json");
 
             // Forward client auth / protocol headers when present.
-            for key in &[AUTHORIZATION, CONTENT_TYPE] {
-                if let Some(val) = request.headers().get(key) {
-                    upstream = upstream.header(key, val);
+            // Detect OAuth tokens (sk-ant-oat) sent via x-api-key and convert
+            // to Authorization: Bearer with required OAuth beta headers.
+            let mut oauth_converted = false;
+            if let Some(api_key_val) = request.headers().get("x-api-key") {
+                if let Ok(key_str) = api_key_val.to_str() {
+                    if key_str.contains("sk-ant-oat") {
+                        upstream = upstream.header(AUTHORIZATION, format!("Bearer {key_str}"));
+                        // Merge OAuth beta headers with any existing ones
+                        let mut betas = vec![
+                            "claude-code-20250219",
+                            "oauth-2025-04-20",
+                            "fine-grained-tool-streaming-2025-05-14",
+                            "interleaved-thinking-2025-05-14",
+                        ];
+                        if let Some(existing) = request.headers().get("anthropic-beta") {
+                            if let Ok(s) = existing.to_str() {
+                                for b in s.split(',') {
+                                    let trimmed = b.trim();
+                                    if !betas.contains(&trimmed) {
+                                        betas.push(trimmed);
+                                    }
+                                }
+                            }
+                        }
+                        upstream = upstream.header("anthropic-beta", betas.join(","));
+                        oauth_converted = true;
+                        tracing::info!("OAuth token detected — converted x-api-key to Bearer auth");
+                    }
                 }
             }
-            for key_name in &["x-api-key", "anthropic-version", "anthropic-beta"] {
-                if let Some(val) = request.headers().get(*key_name) {
-                    upstream = upstream.header(*key_name, val);
+            if !oauth_converted {
+                // Non-OAuth: forward headers as-is
+                for key in &[AUTHORIZATION, CONTENT_TYPE] {
+                    if let Some(val) = request.headers().get(key) {
+                        upstream = upstream.header(key, val);
+                    }
                 }
+                if let Some(val) = request.headers().get("x-api-key") {
+                    upstream = upstream.header("x-api-key", val);
+                }
+                if let Some(val) = request.headers().get("anthropic-beta") {
+                    upstream = upstream.header("anthropic-beta", val);
+                }
+            }
+            if let Some(val) = request.headers().get("anthropic-version") {
+                upstream = upstream.header("anthropic-version", val);
             }
 
             let upstream_result = upstream.body(body_bytes.to_vec()).send().await;

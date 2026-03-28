@@ -950,9 +950,10 @@ pub async fn anthropic_messages_handler(request: Request) -> impl IntoResponse {
                     }
                 }
                 upstream = upstream.header("anthropic-beta", betas.join(","));
-                tracing::info!(
+                tracing::warn!(
                     betas = betas.join(","),
-                    "OAuth: x-api-key -> Bearer, forwarding all client headers"
+                    body = %String::from_utf8_lossy(&body_bytes[..std::cmp::min(body_bytes.len(), 500)]),
+                    "OAuth: x-api-key -> Bearer, request body preview"
                 );
             }
 

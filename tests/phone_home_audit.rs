@@ -117,6 +117,7 @@ fn build_audit_state(
         l3_max_requests_per_minute: 0,
         l3_circuit_breaker_threshold: 5,
         l3_circuit_breaker_cooldown_secs: 30,
+        auth_passthrough: false,
     });
 
     let exact_cache = Arc::new(ExactMatchCache::new(NonZeroUsize::new(1_000).unwrap()));

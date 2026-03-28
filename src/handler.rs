@@ -484,6 +484,144 @@ pub async fn openai_chat_completions_handler(request: Request) -> impl IntoRespo
             }
         };
 
+        // ── Auth pass-through mode ──────────────────────────────────
+        // Forward the client's original request (body + auth headers)
+        // directly to the upstream provider (or configured external_llm_url)
+        // instead of going through the rig-core agent abstraction.
+        if state.config.auth_passthrough {
+            // Determine the upstream URL: use the configured provider URL,
+            // fall back to the provider's default, or finally external_llm_url.
+            let upstream_url = provider_chat_completions_url(&state)
+                .unwrap_or_else(|| state.config.external_llm_url.clone());
+
+            tracing::info!(
+                url = %upstream_url,
+                "OpenAI compat: auth passthrough — forwarding raw request to upstream"
+            );
+
+            let is_streaming = serde_json::from_slice::<serde_json::Value>(&body_bytes)
+                .ok()
+                .and_then(|v| v.get("stream")?.as_bool())
+                .unwrap_or(false);
+
+            let mut upstream = state
+                .http_client
+                .post(&upstream_url)
+                .header(CONTENT_TYPE, "application/json");
+
+            // Forward client auth / protocol headers when present.
+            for key in &[AUTHORIZATION, CONTENT_TYPE] {
+                if let Some(val) = request.headers().get(key) {
+                    upstream = upstream.header(key, val);
+                }
+            }
+            for key_name in &["x-api-key", "api-key"] {
+                if let Some(val) = request.headers().get(*key_name) {
+                    upstream = upstream.header(*key_name, val);
+                }
+            }
+
+            let upstream_result = upstream.body(body_bytes.to_vec()).send().await;
+
+            match upstream_result {
+                Ok(upstream_resp) => {
+                    let status = upstream_resp.status();
+
+                    if !status.is_success() {
+                        state.l3_circuit_breaker.record_failure();
+                        crate::metrics::record_layer_duration_with_tool(
+                            "L3_Cloud",
+                            layer_start.elapsed(),
+                            tool,
+                        );
+                        let err_body = upstream_resp
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| "upstream error".to_string());
+                        tracing::error!(
+                            status = %status,
+                            body = %err_body,
+                            "OpenAI passthrough: upstream returned error"
+                        );
+                        let mut resp = (
+                            StatusCode::from_u16(status.as_u16())
+                                .unwrap_or(StatusCode::BAD_GATEWAY),
+                            [(CONTENT_TYPE, "application/json")],
+                            err_body,
+                        )
+                            .into_response();
+                        resp.extensions_mut().insert(FinalLayer::Cloud);
+                        return resp;
+                    }
+
+                    state.l3_circuit_breaker.record_success();
+                    crate::metrics::record_layer_duration_with_tool(
+                        "L3_Cloud",
+                        layer_start.elapsed(),
+                        tool,
+                    );
+
+                    if is_streaming {
+                        // Pipe the upstream SSE stream through to the client.
+                        let upstream_ct = upstream_resp
+                            .headers()
+                            .get(CONTENT_TYPE)
+                            .cloned()
+                            .unwrap_or_else(|| HeaderValue::from_static("text/event-stream"));
+                        let byte_stream = upstream_resp.bytes_stream();
+                        let body = Body::from_stream(byte_stream);
+                        let mut resp = Response::builder()
+                            .status(StatusCode::OK)
+                            .header(CONTENT_TYPE, upstream_ct)
+                            .body(body)
+                            .unwrap_or_else(|_| {
+                                (StatusCode::INTERNAL_SERVER_ERROR, "stream build error")
+                                    .into_response()
+                            });
+                        resp.extensions_mut().insert(FinalLayer::Cloud);
+                        return resp;
+                    }
+
+                    // Non-streaming: return the JSON body directly.
+                    let resp_body = upstream_resp
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "{}".to_string());
+                    let mut resp = (
+                        StatusCode::OK,
+                        [(CONTENT_TYPE, "application/json")],
+                        resp_body,
+                    )
+                        .into_response();
+                    resp.extensions_mut().insert(FinalLayer::Cloud);
+                    return resp;
+                }
+                Err(err) => {
+                    state.l3_circuit_breaker.record_failure();
+                    crate::metrics::record_layer_duration_with_tool(
+                        "L3_Cloud",
+                        layer_start.elapsed(),
+                        tool,
+                    );
+                    crate::metrics::record_error_with_tool("L3_Cloud", "fatal", tool);
+                    crate::visibility::record_agent_error(tool);
+                    tracing::error!(error = %err, "OpenAI passthrough: upstream request failed");
+                    let mut resp = (
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({
+                            "error": {
+                                "message": format!("[openai-passthrough] {err}")
+                            }
+                        })),
+                    )
+                        .into_response();
+                    resp.extensions_mut().insert(FinalLayer::Cloud);
+                    return resp;
+                }
+            }
+        }
+
+        // ── Standard rig-core agent dispatch ────────────────────────
         let provider_name = state.llm_agent.provider_name();
         tracing::info!(provider = provider_name, "OpenAI compat: forwarding to LLM");
 
@@ -736,6 +874,137 @@ pub async fn anthropic_messages_handler(request: Request) -> impl IntoResponse {
             }
         };
 
+        // ── Auth pass-through mode ──────────────────────────────────
+        // Forward the client's original request (body + auth headers)
+        // directly to https://api.anthropic.com/v1/messages instead of
+        // going through the rig-core agent abstraction.
+        if state.config.auth_passthrough {
+            tracing::info!(
+                "Anthropic compat: auth passthrough — forwarding raw request to upstream"
+            );
+
+            let is_streaming = anthropic_sse::is_streaming_request(&body_bytes);
+
+            let mut upstream = state
+                .http_client
+                .post("https://api.anthropic.com/v1/messages")
+                .header(CONTENT_TYPE, "application/json");
+
+            // Forward client auth / protocol headers when present.
+            for key in &[AUTHORIZATION, CONTENT_TYPE] {
+                if let Some(val) = request.headers().get(key) {
+                    upstream = upstream.header(key, val);
+                }
+            }
+            for key_name in &["x-api-key", "anthropic-version", "anthropic-beta"] {
+                if let Some(val) = request.headers().get(*key_name) {
+                    upstream = upstream.header(*key_name, val);
+                }
+            }
+
+            let upstream_result = upstream.body(body_bytes.to_vec()).send().await;
+
+            match upstream_result {
+                Ok(upstream_resp) => {
+                    let status = upstream_resp.status();
+
+                    if !status.is_success() {
+                        state.l3_circuit_breaker.record_failure();
+                        crate::metrics::record_layer_duration_with_tool(
+                            "L3_Cloud",
+                            layer_start.elapsed(),
+                            tool,
+                        );
+                        let err_body = upstream_resp
+                            .text()
+                            .await
+                            .unwrap_or_else(|_| "upstream error".to_string());
+                        tracing::error!(
+                            status = %status,
+                            body = %err_body,
+                            "Anthropic passthrough: upstream returned error"
+                        );
+                        let mut resp = (
+                            StatusCode::from_u16(status.as_u16())
+                                .unwrap_or(StatusCode::BAD_GATEWAY),
+                            [(CONTENT_TYPE, "application/json")],
+                            err_body,
+                        )
+                            .into_response();
+                        resp.extensions_mut().insert(FinalLayer::Cloud);
+                        return resp;
+                    }
+
+                    state.l3_circuit_breaker.record_success();
+                    crate::metrics::record_layer_duration_with_tool(
+                        "L3_Cloud",
+                        layer_start.elapsed(),
+                        tool,
+                    );
+
+                    if is_streaming {
+                        // Pipe the upstream SSE stream through to the client.
+                        let upstream_ct = upstream_resp
+                            .headers()
+                            .get(CONTENT_TYPE)
+                            .cloned()
+                            .unwrap_or_else(|| HeaderValue::from_static("text/event-stream"));
+                        let byte_stream = upstream_resp.bytes_stream();
+                        let body = Body::from_stream(byte_stream);
+                        let mut resp = Response::builder()
+                            .status(StatusCode::OK)
+                            .header(CONTENT_TYPE, upstream_ct)
+                            .body(body)
+                            .unwrap_or_else(|_| {
+                                (StatusCode::INTERNAL_SERVER_ERROR, "stream build error")
+                                    .into_response()
+                            });
+                        resp.extensions_mut().insert(FinalLayer::Cloud);
+                        return resp;
+                    }
+
+                    // Non-streaming: return the JSON body directly.
+                    let resp_body = upstream_resp
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "{}".to_string());
+                    let mut resp = (
+                        StatusCode::OK,
+                        [(CONTENT_TYPE, "application/json")],
+                        resp_body,
+                    )
+                        .into_response();
+                    resp.extensions_mut().insert(FinalLayer::Cloud);
+                    return resp;
+                }
+                Err(err) => {
+                    state.l3_circuit_breaker.record_failure();
+                    crate::metrics::record_layer_duration_with_tool(
+                        "L3_Cloud",
+                        layer_start.elapsed(),
+                        tool,
+                    );
+                    crate::metrics::record_error_with_tool("L3_Cloud", "fatal", tool);
+                    crate::visibility::record_agent_error(tool);
+                    tracing::error!(error = %err, "Anthropic passthrough: upstream request failed");
+                    let mut resp = (
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({
+                            "type": "error",
+                            "error": {
+                                "type": "api_error",
+                                "message": format!("[anthropic-passthrough] {err}")
+                            }
+                        })),
+                    )
+                        .into_response();
+                    resp.extensions_mut().insert(FinalLayer::Cloud);
+                    return resp;
+                }
+            }
+        }
+
+        // ── Standard rig-core agent dispatch ────────────────────────
         let prompt = extract_prompt(&body_bytes);
 
         let provider_name = state.llm_agent.provider_name();
@@ -1482,6 +1751,7 @@ mod tests {
             l3_max_requests_per_minute: 0,
             l3_circuit_breaker_threshold: 5,
             l3_circuit_breaker_cooldown_secs: 30,
+            auth_passthrough: false,
         });
 
         Arc::new(AppState {

@@ -434,6 +434,21 @@ pub struct AppConfig {
     /// Set via `ISARTOR__OFFLINE_MODE=true` or the `--offline` CLI flag.
     pub offline_mode: bool,
 
+    // ── Auth Pass-Through ──────────────────────────────────────────
+    /// When `true`, the Anthropic and OpenAI-compatible handlers forward
+    /// the client's original HTTP request (body + auth headers) directly
+    /// to the upstream provider instead of going through the rig-core
+    /// agent abstraction.
+    ///
+    /// This is needed when clients use their own OAuth tokens
+    /// (e.g. `sk-ant-oat01-...`) via `Authorization: Bearer` header.
+    /// The current default code path strips client headers and uses the
+    /// gateway's own configured API key.
+    ///
+    /// Set via `ISARTOR__AUTH_PASSTHROUGH=true`. Default is `false`.
+    #[serde(default)]
+    pub auth_passthrough: bool,
+
     // ── CONNECT Proxy ───────────────────────────────────────────────
     /// Socket address the CONNECT proxy will bind to (e.g. "0.0.0.0:8081").
     /// Used by `isartor connect copilot` to intercept Copilot CLI traffic.
@@ -506,6 +521,8 @@ impl AppConfig {
             .set_default("otel_exporter_endpoint", "http://localhost:4317")?
             // Air-gap / offline mode
             .set_default("offline_mode", false)?
+            // Auth pass-through
+            .set_default("auth_passthrough", false)?
             // CONNECT proxy
             .set_default("proxy_port", "0.0.0.0:8081")?
             // Optional config file --------------------------------------

@@ -537,6 +537,7 @@ mod tests {
             l3_max_requests_per_minute: 0,
             l3_circuit_breaker_threshold: 5,
             l3_circuit_breaker_cooldown_secs: 30,
+            auth_passthrough: false,
         });
 
         Arc::new(AppState {
@@ -767,6 +768,7 @@ mod tests {
             l3_max_requests_per_minute: 0,
             l3_circuit_breaker_threshold: 5,
             l3_circuit_breaker_cooldown_secs: 30,
+            auth_passthrough: false,
         });
         let state = Arc::new(AppState {
             http_client: reqwest::Client::new(),
@@ -932,6 +934,7 @@ mod tests {
             l3_max_requests_per_minute: 0,
             l3_circuit_breaker_threshold: 5,
             l3_circuit_breaker_cooldown_secs: 30,
+            auth_passthrough: false,
         });
 
         let state = Arc::new(AppState {

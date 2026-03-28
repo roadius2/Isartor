@@ -893,60 +893,67 @@ pub async fn anthropic_messages_handler(request: Request) -> impl IntoResponse {
             // Forward client auth / protocol headers when present.
             // Detect OAuth tokens (sk-ant-oat) sent via x-api-key and convert
             // to Authorization: Bearer with required OAuth beta headers.
-            let mut oauth_converted = false;
-            if let Some(api_key_val) = request.headers().get("x-api-key") {
-                if let Ok(key_str) = api_key_val.to_str() {
-                    if key_str.contains("sk-ant-oat") {
-                        upstream = upstream.header(AUTHORIZATION, format!("Bearer {key_str}"));
-                        // Merge OAuth beta headers with any existing client betas,
-                        // filtering out betas incompatible with OAuth auth.
-                        // Anthropic rejects context-1m beta with OAuth tokens.
-                        let oauth_incompatible =
-                            |b: &str| -> bool { b.contains("context") && b.contains("1m") };
-                        let mut betas: Vec<&str> = vec![
-                            "claude-code-20250219",
-                            "oauth-2025-04-20",
-                            "fine-grained-tool-streaming-2025-05-14",
-                            "interleaved-thinking-2025-05-14",
-                        ];
-                        if let Some(existing) = request.headers().get("anthropic-beta") {
-                            if let Ok(s) = existing.to_str() {
-                                for b in s.split(',') {
-                                    let trimmed = b.trim();
-                                    if !betas.contains(&trimmed) && !oauth_incompatible(trimmed) {
-                                        betas.push(trimmed);
-                                    }
-                                    if oauth_incompatible(trimmed) {
-                                        tracing::info!(
-                                            beta = trimmed,
-                                            "Stripped OAuth-incompatible beta header"
-                                        );
-                                    }
-                                }
+            // Detect if OAuth token is present in x-api-key
+            let is_oauth = request
+                .headers()
+                .get("x-api-key")
+                .and_then(|v| v.to_str().ok())
+                .map(|k| k.contains("sk-ant-oat"))
+                .unwrap_or(false);
+
+            // Forward ALL original headers (except hop-by-hop ones)
+            let skip_headers = [
+                "host",
+                "content-length",
+                "accept-encoding",
+                "connection",
+                "transfer-encoding",
+            ];
+            for (key, val) in request.headers().iter() {
+                let name = key.as_str().to_lowercase();
+                if skip_headers.contains(&name.as_str()) {
+                    continue;
+                }
+                // For OAuth: skip x-api-key and anthropic-beta — handled below
+                if is_oauth && (name == "x-api-key" || name == "anthropic-beta") {
+                    continue;
+                }
+                upstream = upstream.header(key, val);
+            }
+
+            if is_oauth {
+                // Convert x-api-key OAuth token to Authorization: Bearer
+                let api_key = request
+                    .headers()
+                    .get("x-api-key")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                upstream = upstream.header(AUTHORIZATION, format!("Bearer {api_key}"));
+
+                // Build OAuth beta headers, filtering incompatible ones
+                let oauth_incompatible =
+                    |b: &str| -> bool { b.contains("context") && b.contains("1m") };
+                let mut betas: Vec<&str> = vec![
+                    "claude-code-20250219",
+                    "oauth-2025-04-20",
+                    "fine-grained-tool-streaming-2025-05-14",
+                    "interleaved-thinking-2025-05-14",
+                ];
+                if let Some(existing) = request.headers().get("anthropic-beta") {
+                    if let Ok(s) = existing.to_str() {
+                        for b in s.split(',') {
+                            let trimmed = b.trim();
+                            if !betas.contains(&trimmed) && !oauth_incompatible(trimmed) {
+                                betas.push(trimmed);
                             }
                         }
-                        upstream = upstream.header("anthropic-beta", betas.join(","));
-                        oauth_converted = true;
-                        tracing::info!("OAuth token detected — converted x-api-key to Bearer auth");
                     }
                 }
-            }
-            if !oauth_converted {
-                // Non-OAuth: forward headers as-is
-                for key in &[AUTHORIZATION, CONTENT_TYPE] {
-                    if let Some(val) = request.headers().get(key) {
-                        upstream = upstream.header(key, val);
-                    }
-                }
-                if let Some(val) = request.headers().get("x-api-key") {
-                    upstream = upstream.header("x-api-key", val);
-                }
-                if let Some(val) = request.headers().get("anthropic-beta") {
-                    upstream = upstream.header("anthropic-beta", val);
-                }
-            }
-            if let Some(val) = request.headers().get("anthropic-version") {
-                upstream = upstream.header("anthropic-version", val);
+                upstream = upstream.header("anthropic-beta", betas.join(","));
+                tracing::info!(
+                    betas = betas.join(","),
+                    "OAuth: x-api-key -> Bearer, forwarding all client headers"
+                );
             }
 
             let upstream_result = upstream.body(body_bytes.to_vec()).send().await;

@@ -898,8 +898,12 @@ pub async fn anthropic_messages_handler(request: Request) -> impl IntoResponse {
                 if let Ok(key_str) = api_key_val.to_str() {
                     if key_str.contains("sk-ant-oat") {
                         upstream = upstream.header(AUTHORIZATION, format!("Bearer {key_str}"));
-                        // Merge OAuth beta headers with any existing ones
-                        let mut betas = vec![
+                        // Merge OAuth beta headers with any existing client betas,
+                        // filtering out betas incompatible with OAuth auth.
+                        // Anthropic rejects context-1m beta with OAuth tokens.
+                        let oauth_incompatible =
+                            |b: &str| -> bool { b.contains("context") && b.contains("1m") };
+                        let mut betas: Vec<&str> = vec![
                             "claude-code-20250219",
                             "oauth-2025-04-20",
                             "fine-grained-tool-streaming-2025-05-14",
@@ -909,8 +913,14 @@ pub async fn anthropic_messages_handler(request: Request) -> impl IntoResponse {
                             if let Ok(s) = existing.to_str() {
                                 for b in s.split(',') {
                                     let trimmed = b.trim();
-                                    if !betas.contains(&trimmed) {
+                                    if !betas.contains(&trimmed) && !oauth_incompatible(trimmed) {
                                         betas.push(trimmed);
+                                    }
+                                    if oauth_incompatible(trimmed) {
+                                        tracing::info!(
+                                            beta = trimmed,
+                                            "Stripped OAuth-incompatible beta header"
+                                        );
                                     }
                                 }
                             }
